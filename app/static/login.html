@@ -30,7 +30,12 @@
   <button type="submit">Sign in</button>
 </form>
 <script>
-  if (new URLSearchParams(location.search).has("error")) document.getElementById("err").style.display = "block";
+  const err = new URLSearchParams(location.search).get("error");
+  if (err) {
+    const box = document.getElementById("err");
+    if (err === "locked") box.textContent = "Too many failed sign-ins. Try again in 15 minutes.";
+    box.style.display = "block";
+  }
 </script>
 </body>
 </html>

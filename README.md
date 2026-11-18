@@ -57,7 +57,7 @@ The hosted copy runs on [Vercel](https://vercel.com) with a [Neon](https://neon.
 AVB_USERS=qa.lead:a-long-password,dev1:another-long-password
 ```
 
-When login is on, people sign in on a sign-in page (sessions last 12 hours), and the audit trail records the logged-in username, not the free-text name field. Scripts can send the same username and password as HTTP Basic auth. That gives you attributable records, which is closer to what Part 11 expects.
+When login is on, people sign in on a sign-in page (sessions last 12 hours), and the audit trail records the logged-in username, not the free-text name field. Scripts can send the same username and password as HTTP Basic auth. After 5 wrong passwords for a username (or 30 from one IP address) in 15 minutes, sign-in is refused until the window passes. That gives you attributable records, which is closer to what Part 11 expects.
 
 ### Vercel
 
@@ -66,7 +66,8 @@ Vercel finds the FastAPI app in `app/main.py` with no extra config.
 1. Import the GitHub repo in Vercel (or run `vercel link`).
 2. Add a Neon database: `vercel integration add neon` (the free plan is enough). This sets `DATABASE_URL`.
 3. Add `ANTHROPIC_API_KEY` and `AVB_USERS` under **Settings → Environment Variables**.
-4. Push to `main`. Pull requests get preview deployments.
+4. Optional: connect a second Neon database to Preview and Development with the prefix `PREVIEW` (`vercel integration resource connect <db> <project> -e preview -e development --prefix PREVIEW`). Previews then use `PREVIEW_DATABASE_URL`, so test data never reaches the live site.
+5. Push to `main`. Pull requests get preview deployments, and GitHub Actions runs the tests (SQLite and Postgres) on every PR.
 
 The tables are created on first start. To run the Postgres test locally, set `TEST_DATABASE_URL` to an **unpooled** connection string (`DATABASE_URL_UNPOOLED`); it works in a throwaway schema and drops it afterwards.
 

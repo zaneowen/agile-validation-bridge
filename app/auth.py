@@ -21,6 +21,7 @@ import os
 import secrets
 import time
 
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
@@ -74,26 +75,74 @@ def read_session(value: str | None, users: dict[str, str]) -> str | None:
     return user if user in users else None
 
 
-def _basic(header: str | None, users: dict[str, str]) -> str | None:
+def client_ip(request: Request) -> str:
+    # Vercel and Render put the real client first in X-Forwarded-For.
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() or (request.client.host if request.client else "unknown")
+
+
+class LoginLimiter:
+    """Slows down password guessing. Failures live in the database because
+    serverless instances don't share memory."""
+
+    WINDOW = 15 * 60
+    PER_USER = 5
+    PER_IP = 30
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def blocked(self, username: str, ip: str) -> bool:
+        since = time.time() - self.WINDOW
+        by_user = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM login_failures WHERE username = ? AND at > ?", (username, since)
+        ).fetchone()["n"]
+        by_ip = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM login_failures WHERE ip = ? AND at > ?", (ip, since)
+        ).fetchone()["n"]
+        return by_user >= self.PER_USER or by_ip >= self.PER_IP
+
+    def failed(self, username: str, ip: str) -> None:
+        now = time.time()
+        self.conn.execute("INSERT INTO login_failures (at, username, ip) VALUES (?, ?, ?)",
+                          (now, username[:200], ip[:100]))
+        self.conn.execute("DELETE FROM login_failures WHERE at < ?", (now - 24 * 3600,))
+
+    def succeeded(self, username: str) -> None:
+        self.conn.execute("DELETE FROM login_failures WHERE username = ?", (username,))
+
+
+def _basic_credentials(header: str | None) -> tuple[str, str] | None:
     if not header or not header.startswith("Basic "):
         return None
     try:
         name, _, pw = base64.b64decode(header[6:]).decode().partition(":")
     except (binascii.Error, UnicodeDecodeError):
         return None
-    return name if check_password(users, name, pw) else None
+    return name, pw
 
 
 class LoginMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, users: dict[str, str]):
+    def __init__(self, app, users: dict[str, str], limiter: LoginLimiter):
         super().__init__(app)
         self.users = users
+        self.limiter = limiter
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path in OPEN_PATHS:
             return await call_next(request)
-        user = read_session(request.cookies.get(COOKIE), self.users) or _basic(
-            request.headers.get("authorization"), self.users)
+        user = read_session(request.cookies.get(COOKIE), self.users)
+        creds = None if user else _basic_credentials(request.headers.get("authorization"))
+        if creds:  # script login: same guessing limits as the sign-in page
+            name, pw = creds
+            ip = client_ip(request)
+            if self.limiter.blocked(name, ip):
+                return JSONResponse({"detail": "Too many failed sign-ins. Try again in 15 minutes."},
+                                    status_code=429)
+            if check_password(self.users, name, pw):
+                user = name
+            else:
+                self.limiter.failed(name, ip)
         if not user:
             if request.url.path.startswith("/api/"):
                 return JSONResponse({"detail": "Login required"}, status_code=401)

@@ -65,8 +65,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app = FastAPI(title="Agile-to-Validation Bridge", version="0.1.0")
     conn = db.connect(db_path)
     users = auth.load_users()
+    limiter = auth.LoginLimiter(conn)
     if users:
-        app.add_middleware(auth.LoginMiddleware, users=users)
+        app.add_middleware(auth.LoginMiddleware, users=users, limiter=limiter)
 
     @app.get("/", include_in_schema=False)
     def index():
@@ -84,8 +85,15 @@ def create_app(db_path: str | None = None) -> FastAPI:
         form = parse_qs((await request.body()).decode("utf-8", "replace"))
         name = form.get("username", [""])[0].strip()
         pw = form.get("password", [""])[0]
-        if not users or not auth.check_password(users, name, pw):
+        if not users:
+            return RedirectResponse("/", status_code=303)
+        ip = auth.client_ip(request)
+        if limiter.blocked(name, ip):
+            return RedirectResponse("/login?error=locked", status_code=303)
+        if not auth.check_password(users, name, pw):
+            limiter.failed(name, ip)
             return RedirectResponse("/login?error=1", status_code=303)
+        limiter.succeeded(name)
         res = RedirectResponse("/", status_code=303)
         res.set_cookie(auth.COOKIE, auth.make_session(name), max_age=auth.SESSION_SECONDS,
                        httponly=True, samesite="lax", secure=request.url.scheme == "https"
