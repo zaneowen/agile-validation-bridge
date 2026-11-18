@@ -23,6 +23,7 @@ STORY = {
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("AVB_MOCK_AI", "1")
+    monkeypatch.delenv("AVB_USERS", raising=False)  # a local .env must not switch on login
     db_path = str(tmp_path / "test.db")
     c = TestClient(create_app(db_path))
     c.db_path = db_path
@@ -80,3 +81,17 @@ def test_rtm_exports(client):
     ws = wb["Traceability"]
     assert ws.max_row == 3
     assert ws["G2"].value == "High"
+
+
+def test_login_required_when_users_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVB_MOCK_AI", "1")
+    monkeypatch.setenv("AVB_USERS", "qa.lead:pw1")
+    c = TestClient(create_app(str(tmp_path / "auth.db")))
+    assert c.get("/api/health").status_code == 200
+    assert c.get("/").status_code == 401
+    assert c.get("/api/stories", auth=("qa.lead", "wrong")).status_code == 401
+    s = c.post("/api/stories", json=STORY, auth=("qa.lead", "pw1")).json()
+    c.post(f"/api/analyses/{s['analysis']['id']}/review", auth=("qa.lead", "pw1"),
+           json={"reviewer": "someone-else", "decision": "approve"})
+    actors = [e["actor"] for e in c.get("/api/audit", auth=("qa.lead", "pw1")).json()]
+    assert actors[0] == "qa.lead" and actors[-1] == "qa.lead"
