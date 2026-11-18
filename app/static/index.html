@@ -66,8 +66,10 @@
       <textarea id="desc" placeholder="As a QA reviewer I want to…"></textarea>
       <label for="ac">Acceptance criteria (one per line)</label>
       <textarea id="ac" placeholder="Signature requires re-entering the password&#10;Signed results cannot be edited"></textarea>
-      <label for="actor">Your name</label>
-      <input id="actor" value="zane">
+      <div id="actorWrap">
+        <label for="actor">Your name</label>
+        <input id="actor" placeholder="Recorded in the audit trail">
+      </div>
       <div class="row" style="margin-top:14px">
         <button type="submit" id="submitBtn">Analyze story</button>
         <button type="button" class="secondary" id="sampleBtn">Load sample</button>
@@ -162,7 +164,7 @@ $("storyForm").addEventListener("submit", async (ev) => {
       acceptance_criteria: $("ac").value.split("\n").map(s => s.trim()).filter(Boolean),
       requirement_id: $("req").value || null, actor: $("actor").value || "anonymous",
     })});
-    ev.target.reset(); $("actor").value = "zane";
+    const who = $("actor").value; ev.target.reset(); $("actor").value = who;
     refresh();
   } catch (e) { alert(e.message); }
   finally { btn.disabled = false; btn.textContent = "Analyze story"; }
@@ -175,7 +177,14 @@ $("sampleBtn").addEventListener("click", () => {
   $("ac").value = "Signing requires the reviewer to re-enter their password\nThe signature shows name, date/time and meaning (reviewed/approved)\nSigned results cannot be edited; changes create a new version\nEvery signature event is written to the audit trail";
 });
 
+try { $("actor").value = localStorage.getItem("avb.actor") || ""; } catch {}
+$("actor").addEventListener("change", () => { try { localStorage.setItem("avb.actor", $("actor").value); } catch {} });
 api("/api/health").then(h => { $("mode").textContent = h.mock_ai ? "Mock AI (no API key)" : "Claude connected"; });
+api("/api/me").then(m => {
+  if (!m.user) return;  // no login configured: keep the free-text name
+  $("actor").value = m.user;
+  $("actorWrap").innerHTML = `<div class="muted" style="margin-top:10px">Signed in as <strong>${esc(m.user)}</strong></div><input id="actor" type="hidden" value="${esc(m.user)}">`;
+}).catch(() => {});
 refresh();
 </script>
 </body>

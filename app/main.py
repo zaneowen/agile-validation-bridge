@@ -12,11 +12,18 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import ai, db
+from . import ai, auth, db
+
+try:  # load .env when running locally; harmless if python-dotenv is missing
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
 
 STATIC = Path(__file__).parent / "static"
 
@@ -56,6 +63,9 @@ def _story_row(conn, story_id: int) -> dict:
 def create_app(db_path: str | None = None) -> FastAPI:
     app = FastAPI(title="Agile-to-Validation Bridge", version="0.1.0")
     conn = db.connect(db_path)
+    users = auth.load_users()
+    if users:
+        app.add_middleware(auth.BasicAuthMiddleware, users=users)
 
     @app.get("/", include_in_schema=False)
     def index():
@@ -63,10 +73,15 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "mock_ai": ai.use_mock()}
+        return {"ok": True, "mock_ai": ai.use_mock(), "login": bool(users)}
+
+    @app.get("/api/me")
+    def me(request: Request):
+        return {"user": auth.current_user(request)}
 
     @app.post("/api/stories")
-    def create_story(story: StoryIn):
+    def create_story(story: StoryIn, request: Request):
+        story.actor = auth.current_user(request) or story.actor
         cur = conn.execute(
             "INSERT INTO stories (key, title, description, acceptance_criteria, requirement_id, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?)",
@@ -103,7 +118,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
         return _story_row(conn, story_id)
 
     @app.post("/api/analyses/{analysis_id}/review")
-    def review(analysis_id: int, body: ReviewIn):
+    def review(analysis_id: int, body: ReviewIn, request: Request):
+        body.reviewer = auth.current_user(request) or body.reviewer
         a = conn.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
         if not a:
             raise HTTPException(404, "Analysis not found")
