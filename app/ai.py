@@ -6,10 +6,11 @@ demoed and tested offline.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
-from .prompts import ANALYSIS_TOOL, SYSTEM_PROMPT, build_user_message
+from .prompts import ANALYSIS_SCHEMA, SYSTEM_PROMPT, build_user_message
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
 
@@ -31,20 +32,25 @@ def analyze_story(title: str, description: str, acceptance_criteria: list[str]) 
     import anthropic
 
     client = anthropic.Anthropic()
+    # Structured outputs guarantee JSON matching the schema. (Forced tool use,
+    # which this used before, returns a 400 on Claude 5 models.)
     response = client.messages.create(
         model=os.environ.get("AVB_MODEL", DEFAULT_MODEL),
-        max_tokens=4000,
+        max_tokens=16000,  # thinking is always on, so leave room for it
         system=SYSTEM_PROMPT,
-        tools=[ANALYSIS_TOOL],
-        tool_choice={"type": "tool", "name": ANALYSIS_TOOL["name"]},
+        output_config={"format": {"type": "json_schema", "schema": ANALYSIS_SCHEMA}},
         messages=[
             {"role": "user", "content": build_user_message(title, description, acceptance_criteria)}
         ],
     )
-    for block in response.content:
-        if block.type == "tool_use":
-            return block.input
-    raise RuntimeError("Model did not return a structured analysis.")
+    if response.stop_reason == "refusal":
+        raise RuntimeError("The model declined to analyze this story.")
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError("The analysis was cut off before it finished. Try a shorter story.")
+    text = next((b.text for b in response.content if b.type == "text"), None)
+    if text is None:
+        raise RuntimeError("Model did not return a structured analysis.")
+    return json.loads(text)
 
 
 def _mock_analysis(title: str, description: str, acceptance_criteria: list[str]) -> dict:
