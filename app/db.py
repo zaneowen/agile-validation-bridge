@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS login_failures (
     username TEXT NOT NULL,
     ip TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS signatures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    analysis_id INTEGER NOT NULL UNIQUE REFERENCES analyses(id),
+    signer TEXT NOT NULL,
+    meaning TEXT NOT NULL,
+    signed_at TEXT NOT NULL,
+    record_hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS signatures_no_update BEFORE UPDATE ON signatures
+BEGIN SELECT RAISE(ABORT, 'signatures are permanent'); END;
+CREATE TRIGGER IF NOT EXISTS signatures_no_delete BEFORE DELETE ON signatures
+BEGIN SELECT RAISE(ABORT, 'signatures are permanent'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log
@@ -88,14 +100,28 @@ CREATE TABLE IF NOT EXISTS login_failures (
     username TEXT NOT NULL,
     ip TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS signatures (
+    id BIGSERIAL PRIMARY KEY,
+    analysis_id BIGINT NOT NULL UNIQUE REFERENCES analyses(id),
+    signer TEXT NOT NULL,
+    meaning TEXT NOT NULL,
+    signed_at TEXT NOT NULL,
+    record_hash TEXT NOT NULL
+);
 CREATE OR REPLACE FUNCTION audit_log_append_only() RETURNS trigger AS $$
-BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;
+BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER audit_no_update BEFORE UPDATE ON audit_log
     FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
 CREATE OR REPLACE TRIGGER audit_no_delete BEFORE DELETE ON audit_log
     FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
 CREATE OR REPLACE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit_log
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER signatures_no_update BEFORE UPDATE ON signatures
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER signatures_no_delete BEFORE DELETE ON signatures
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER signatures_no_truncate BEFORE TRUNCATE ON signatures
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
 """
 
@@ -223,3 +249,9 @@ def log(conn, actor: str, action: str, story_id: int | None, detail: dict) -> No
         "INSERT INTO audit_log (at, actor, action, story_id, detail) VALUES (?, ?, ?, ?, ?)",
         (now(), actor, action, story_id, json.dumps(detail)),
     )
+
+
+def is_unique_violation(exc: Exception) -> bool:
+    if isinstance(exc, sqlite3.IntegrityError):
+        return "UNIQUE" in str(exc)
+    return getattr(exc, "sqlstate", None) == "23505"  # Postgres unique_violation

@@ -95,7 +95,7 @@ def test_login_required_when_users_set(tmp_path, monkeypatch):
     assert c.get("/api/stories", auth=("qa.lead", "wrong")).status_code == 401
     s = c.post("/api/stories", json=STORY, auth=("qa.lead", "pw1")).json()
     c.post(f"/api/analyses/{s['analysis']['id']}/review", auth=("qa.lead", "pw1"),
-           json={"reviewer": "someone-else", "decision": "approve"})
+           json={"reviewer": "someone-else", "decision": "approve", "password": "pw1"})
     actors = [e["actor"] for e in c.get("/api/audit", auth=("qa.lead", "pw1")).json()]
     assert actors[0] == "qa.lead" and actors[-1] == "qa.lead"
 
@@ -147,7 +147,10 @@ def test_postgres_flow_and_append_only(monkeypatch):
         assert [e["action"] for e in c.get("/api/audit").json()][0] == "analysis.override"
         assert c.get("/api/rtm.csv").status_code == 200
         with psycopg.connect(url, autocommit=True) as conn:
-            for sql in ("DELETE FROM audit_log", "UPDATE audit_log SET actor = 'x'", "TRUNCATE audit_log"):
+            conn.execute("INSERT INTO signatures (analysis_id, signer, meaning, signed_at, record_hash)"
+                         " VALUES (%s, 'qa', 'Approved', 'now', 'h')", (s["analysis"]["id"],))
+            for sql in ("DELETE FROM audit_log", "UPDATE audit_log SET actor = 'x'", "TRUNCATE audit_log",
+                        "DELETE FROM signatures", "UPDATE signatures SET meaning = 'x'", "TRUNCATE signatures"):
                 with pytest.raises(psycopg.errors.RaiseException):
                     conn.execute(sql)
     finally:
@@ -179,3 +182,76 @@ def test_previews_use_their_own_database(monkeypatch):
     assert db.database_url() == "postgresql://preview"
     monkeypatch.delenv("VERCEL_ENV")
     assert db.database_url() == "postgresql://prod"
+
+
+def _login_client(tmp_path, monkeypatch, name="sig.db"):
+    monkeypatch.setenv("AVB_MOCK_AI", "1")
+    monkeypatch.setenv("AVB_USERS", "qa.lead:pw1,dev:pw2")
+    c = TestClient(create_app(str(tmp_path / name)))
+    c.post("/login", data={"username": "qa.lead", "password": "pw1"})
+    return c
+
+
+def test_review_is_an_electronic_signature(tmp_path, monkeypatch):
+    c = _login_client(tmp_path, monkeypatch)
+    aid = c.post("/api/stories", json=STORY).json()["analysis"]["id"]
+
+    no_pw = c.post(f"/api/analyses/{aid}/review", json={"reviewer": "x", "decision": "approve"})
+    assert no_pw.status_code == 403
+    wrong = c.post(f"/api/analyses/{aid}/review",
+                   json={"reviewer": "x", "decision": "approve", "password": "pw2"})  # dev's password
+    assert wrong.status_code == 403
+    assert c.get("/api/audit").json()[0]["action"] == "signature.failed"
+
+    ok = c.post(f"/api/analyses/{aid}/review",
+                json={"reviewer": "x", "decision": "approve", "password": "pw1", "meaning": "Reviewed"})
+    assert ok.status_code == 200
+    a = ok.json()["analysis"]
+    sig = a["signature"]
+    assert a["status"] == "approved" and a["reviewer"] == "qa.lead"
+    assert sig["signer"] == "qa.lead" and sig["meaning"] == "Reviewed" and len(sig["record_hash"]) == 64
+
+    # the hash binds the signature to exactly this record
+    from app.main import signature_hash
+    raw = sqlite3.connect(str(tmp_path / "sig.db"))
+    raw.row_factory = sqlite3.Row
+    row = dict(raw.execute("SELECT * FROM analyses WHERE id = ?", (aid,)).fetchone())
+    assert signature_hash(row, "approve", "High", "Reviewed", "qa.lead", sig["signed_at"]) == sig["record_hash"]
+    assert signature_hash(row, "approve", "Low", "Reviewed", "qa.lead", sig["signed_at"]) != sig["record_hash"]
+
+    # signed once, for good
+    again = c.post(f"/api/analyses/{aid}/review",
+                   json={"reviewer": "x", "decision": "reject", "comment": "no", "password": "pw1"})
+    assert again.status_code == 409
+    with pytest.raises(sqlite3.IntegrityError):
+        raw.execute("UPDATE signatures SET meaning = 'Approved'")
+    with pytest.raises(sqlite3.IntegrityError):
+        raw.execute("DELETE FROM signatures")
+
+    rtm = c.get("/api/rtm.csv").text.splitlines()
+    assert "Signature meaning" in rtm[0] and ",Reviewed," in rtm[1]
+
+
+def test_rejection_is_signed_as_rejected(tmp_path, monkeypatch):
+    c = _login_client(tmp_path, monkeypatch, "rej.db")
+    aid = c.post("/api/stories", json=STORY).json()["analysis"]["id"]
+    r = c.post(f"/api/analyses/{aid}/review", json={
+        "reviewer": "x", "decision": "reject", "comment": "Tests miss the lockout rule",
+        "password": "pw1", "meaning": "Approved"})
+    assert r.json()["analysis"]["signature"]["meaning"] == "Rejected"
+
+
+def test_wrong_signature_passwords_count_toward_lockout(tmp_path, monkeypatch):
+    c = _login_client(tmp_path, monkeypatch, "lock.db")
+    aid = c.post("/api/stories", json=STORY).json()["analysis"]["id"]
+    for _ in range(5):
+        c.post(f"/api/analyses/{aid}/review", json={"reviewer": "x", "decision": "approve", "password": "bad"})
+    r = c.post(f"/api/analyses/{aid}/review", json={"reviewer": "x", "decision": "approve", "password": "pw1"})
+    assert r.status_code == 429
+
+
+def test_reviews_without_login_are_unsigned(client):
+    aid = client.post("/api/stories", json=STORY).json()["analysis"]["id"]
+    a = client.post(f"/api/analyses/{aid}/review", json={"reviewer": "zane", "decision": "approve"}).json()["analysis"]
+    assert a["status"] == "approved" and a["signature"] is None
+    assert client.get("/api/audit").json()[0]["detail"]["signature"] == "unsigned (login is off)"

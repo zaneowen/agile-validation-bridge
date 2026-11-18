@@ -34,6 +34,7 @@
   .warn { background:#fff7e6; border:1px solid #f3d9a4; border-radius:6px; padding:8px 10px; font-size:13px; margin-top:8px; }
   .review { background:var(--bg); border-radius:8px; padding:12px; margin-top:12px; }
   .review select, .review input { width:auto; }
+  .sig { margin-top:6px; font-size:13px; border-left:3px solid var(--accent); padding-left:8px; }
   #mode { font-size:12px; }
   .audit { font-family: ui-monospace, Menlo, monospace; font-size:12px; max-height:260px; overflow:auto; white-space:pre-wrap; }
   .empty { color:var(--muted); text-align:center; padding:40px 0; }
@@ -88,6 +89,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+let ME = null;  // signed-in username when login is on
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function api(path, opts = {}) {
@@ -110,19 +112,33 @@ function renderStory(s) {
   const a = s.analysis; if (!a) return "";
   const r = a.result;
   const reviewed = a.status !== "pending";
+  const sig = a.signature;
+  const signedLine = sig
+    ? `<div class="sig">✍ Electronically signed by <strong>${esc(sig.signer)}</strong> · meaning: <strong>${esc(sig.meaning)}</strong> · ${esc(sig.signed_at.replace("T", " ").replace("+00:00", " UTC"))}
+         <span class="muted" title="${esc(sig.record_hash)}">· record ${esc(sig.record_hash.slice(0, 12))}…</span></div>`
+    : `<div class="muted">Unsigned review (login is off)</div>`;
   const review = reviewed
-    ? `<div class="review">${a.status === "rejected" ? "Rejected" : `Approved as <span class="badge ${a.final_risk}">${a.final_risk}</span>`} by ${esc(a.reviewer)}</div>`
+    ? `<div class="review">${a.status === "rejected" ? "Rejected" : `Approved as <span class="badge ${a.final_risk}">${a.final_risk}</span>`} by ${esc(a.reviewer)}${signedLine}</div>`
     : `<div class="review"><strong>Review the AI suggestion</strong>
         <div class="row" style="margin-top:8px">
-          <select id="dec-${a.id}">
+          <select id="dec-${a.id}" onchange="decChanged(${a.id})">
             <option value="approve">Approve as ${r.risk}</option>
             <option value="override">Override risk</option>
             <option value="reject">Reject drafts</option>
           </select>
-          <select id="risk-${a.id}"><option>High</option><option>Medium</option><option>Low</option></select>
+          <select id="risk-${a.id}" style="display:none"><option>High</option><option>Medium</option><option>Low</option></select>
           <input id="cmt-${a.id}" placeholder="Comment (needed for override/reject)" style="flex:1;min-width:180px">
-          <button onclick="review(${a.id})">Submit</button>
-        </div></div>`;
+        </div>
+        ${ME ? `<div class="row" style="margin-top:8px">
+          <label for="mean-${a.id}" style="margin:0">Signature meaning</label>
+          <select id="mean-${a.id}"><option>Approved</option><option>Reviewed</option></select>
+          <input id="pw-${a.id}" type="password" autocomplete="current-password" placeholder="Re-enter your password to sign" style="flex:1;min-width:180px">
+          <button onclick="review(${a.id})">Sign as ${esc(ME)}</button>
+        </div>
+        <div class="muted" style="margin-top:6px">Signing records your name, the date and time, and the meaning. It can't be edited or undone.</div>`
+        : `<div class="row" style="margin-top:8px"><button onclick="review(${a.id})">Submit</button>
+           <span class="muted">Turn on login (AVB_USERS) to sign reviews electronically.</span></div>`}
+      </div>`;
   return `<div class="card story">
     <div class="row"><span class="badge ${r.risk}">${r.risk}</span>
       <span class="pill">${esc(r.test_approach)} testing</span>
@@ -144,16 +160,28 @@ async function refresh() {
     `${e.at}  ${e.actor}  ${e.action}  #${e.story_id ?? "-"}  ${JSON.stringify(e.detail)}`).join("\n") || "(empty)";
 }
 
+function decChanged(id) {
+  const d = $(`dec-${id}`).value;
+  $(`risk-${id}`).style.display = d === "override" ? "" : "none";
+  if ($(`mean-${id}`)) $(`mean-${id}`).disabled = d === "reject";  // rejections are signed as "Rejected"
+}
+
 async function review(id) {
+  const body = {
+    reviewer: $("actor").value || "anonymous",
+    decision: $(`dec-${id}`).value,
+    final_risk: $(`risk-${id}`).value,
+    comment: $(`cmt-${id}`).value,
+  };
+  if (ME) {
+    body.password = $(`pw-${id}`).value;
+    body.meaning = $(`mean-${id}`).value;
+    if (!body.password) { alert("Re-enter your password to sign."); return; }
+  }
   try {
-    await api(`/api/analyses/${id}/review`, { method: "POST", body: JSON.stringify({
-      reviewer: $("actor").value || "anonymous",
-      decision: $(`dec-${id}`).value,
-      final_risk: $(`risk-${id}`).value,
-      comment: $(`cmt-${id}`).value,
-    })});
+    await api(`/api/analyses/${id}/review`, { method: "POST", body: JSON.stringify(body) });
     refresh();
-  } catch (e) { alert(e.message); }
+  } catch (e) { alert(e.message); if ($(`pw-${id}`)) $(`pw-${id}`).value = ""; }
 }
 
 $("storyForm").addEventListener("submit", async (ev) => {
@@ -183,10 +211,10 @@ $("actor").addEventListener("change", () => { try { localStorage.setItem("avb.ac
 api("/api/health").then(h => { $("mode").textContent = h.mock_ai ? "Mock AI (no API key)" : "Claude connected"; });
 api("/api/me").then(m => {
   if (!m.user) return;  // no login configured: keep the free-text name
+  ME = m.user;
   $("actor").value = m.user;
   $("actorWrap").innerHTML = `<div class="muted" style="margin-top:10px">Signed in as <strong>${esc(m.user)}</strong> · <a href="/logout">Sign out</a></div><input id="actor" type="hidden" value="${esc(m.user)}">`;
-}).catch(() => {});
-refresh();
+}).catch(() => {}).finally(refresh);  // render after we know whether reviews are signed
 </script>
 </body>
 </html>
