@@ -153,3 +153,29 @@ def test_postgres_flow_and_append_only(monkeypatch):
     finally:
         with psycopg.connect(base, autocommit=True) as admin:
             admin.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+def test_repeated_wrong_passwords_lock_the_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVB_MOCK_AI", "1")
+    monkeypatch.setenv("AVB_USERS", "qa.lead:pw1")
+    c = TestClient(create_app(str(tmp_path / "limit.db")))
+    for _ in range(5):
+        r = c.post("/login", data={"username": "qa.lead", "password": "guess"}, follow_redirects=False)
+        assert r.headers["location"] == "/login?error=1"
+    # even the right password is refused while locked, on the page and for scripts
+    r = c.post("/login", data={"username": "qa.lead", "password": "pw1"}, follow_redirects=False)
+    assert r.headers["location"] == "/login?error=locked"
+    assert c.get("/api/me", auth=("qa.lead", "pw1")).status_code == 429
+
+
+def test_previews_use_their_own_database(monkeypatch):
+    from app import db
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://prod")
+    monkeypatch.setenv("PREVIEW_DATABASE_URL", "postgresql://preview")
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    assert db.database_url() == "postgresql://prod"
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    assert db.database_url() == "postgresql://preview"
+    monkeypatch.delenv("VERCEL_ENV")
+    assert db.database_url() == "postgresql://prod"

@@ -8,3 +8,5 @@ venv/
 .DS_Store
 .vercel
 .env*.local
+.env*
+!.env.example

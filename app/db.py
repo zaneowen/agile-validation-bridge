@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     story_id INTEGER,
     detail TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS login_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at REAL NOT NULL,
+    username TEXT NOT NULL,
+    ip TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log
@@ -75,6 +81,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     action TEXT NOT NULL,
     story_id BIGINT,
     detail TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS login_failures (
+    id BIGSERIAL PRIMARY KEY,
+    at DOUBLE PRECISION NOT NULL,
+    username TEXT NOT NULL,
+    ip TEXT NOT NULL
 );
 CREATE OR REPLACE FUNCTION audit_log_append_only() RETURNS trigger AS $$
 BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;
@@ -191,8 +203,16 @@ class PostgresDB:
         pass
 
 
+def database_url() -> str | None:
+    # Vercel previews (and `vercel dev`) get their own database, so test data
+    # never reaches the live site.
+    if os.environ.get("VERCEL_ENV") in ("preview", "development") and os.environ.get("PREVIEW_DATABASE_URL"):
+        return os.environ["PREVIEW_DATABASE_URL"]
+    return os.environ.get("DATABASE_URL")
+
+
 def connect(path: str | None = None):
-    url = os.environ.get("DATABASE_URL")
+    url = database_url()
     if url and not path:
         return PostgresDB(url)
     return SqliteDB(path or os.environ.get("AVB_DB", "avb.db"))
