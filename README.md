@@ -6,7 +6,7 @@ Paste a user story and the app:
 
 1. **Rates its GxP impact** (High / Medium / Low) with a rationale, and flags Part 11 / Annex 11 relevance
 2. **Drafts test cases** scaled to that risk: scripted for High, unscripted for Medium, ad hoc for Low
-3. **Requires a human decision**: approve, override (with a comment) or reject
+3. **Requires a human decision**: approve, override (with a comment) or reject. With login on, the decision is an **electronic signature**: the reviewer re-enters their password and picks a meaning (Approved / Reviewed; rejections are signed as Rejected). The signature records name, UTC time and meaning plus a SHA-256 hash of exactly what was signed, can't be edited or deleted, and each analysis can be signed only once
 4. **Logs everything** to an append-only audit trail (SQLite triggers block edits and deletes)
 5. **Exports a traceability matrix** (requirement → story → criterion → test) to Excel or CSV
 

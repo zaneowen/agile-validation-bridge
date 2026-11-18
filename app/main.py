@@ -6,6 +6,7 @@ Run:  uvicorn app.main:app --reload
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -43,6 +44,22 @@ class ReviewIn(BaseModel):
     decision: Literal["approve", "override", "reject"]
     final_risk: Literal["High", "Medium", "Low"] | None = None
     comment: str = ""
+    # Electronic signature (required when login is on): the reviewer re-enters
+    # their password and states what the signature means.
+    password: str = ""
+    meaning: Literal["Approved", "Reviewed"] = "Approved"
+
+
+def signature_hash(analysis: dict, decision: str, final_risk: str | None, meaning: str,
+                   signer: str, signed_at: str) -> str:
+    """Fingerprint of exactly what was signed, so a signature can't be moved
+    to other content (Part 11 §11.70 signature/record linking)."""
+    payload = {
+        "analysis_id": analysis["id"], "story_id": analysis["story_id"],
+        "result": analysis["result"], "decision": decision, "final_risk": final_risk,
+        "meaning": meaning, "signer": signer, "signed_at": signed_at,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _story_row(conn, story_id: int) -> dict:
@@ -57,6 +74,9 @@ def _story_row(conn, story_id: int) -> dict:
     if a:
         analysis = dict(a)
         analysis["result"] = json.loads(analysis["result"])
+        sig = conn.execute("SELECT signer, meaning, signed_at, record_hash FROM signatures"
+                           " WHERE analysis_id = ?", (analysis["id"],)).fetchone()
+        analysis["signature"] = dict(sig) if sig else None
         story["analysis"] = analysis
     return story
 
@@ -154,10 +174,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.post("/api/analyses/{analysis_id}/review")
     def review(analysis_id: int, body: ReviewIn, request: Request):
-        body.reviewer = auth.current_user(request) or body.reviewer
+        signer = auth.current_user(request)
+        body.reviewer = signer or body.reviewer
         a = conn.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
         if not a:
             raise HTTPException(404, "Analysis not found")
+        if a["status"] != "pending":
+            raise HTTPException(409, "This analysis has already been reviewed and signed")
         suggested = json.loads(a["result"])["risk"]
         if body.decision == "override" and not body.final_risk:
             raise HTTPException(422, "An override needs final_risk")
@@ -166,6 +189,29 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
         final = {"approve": suggested, "override": body.final_risk, "reject": None}[body.decision]
         status = {"approve": "approved", "override": "approved", "reject": "rejected"}[body.decision]
+        meaning = "Rejected" if body.decision == "reject" else body.meaning
+
+        signature = None
+        if signer:  # login on: the review is an electronic signature
+            ip = auth.client_ip(request)
+            if limiter.blocked(signer, ip):
+                raise HTTPException(429, "Too many failed signatures. Try again in 15 minutes.")
+            if not auth.check_password(users, signer, body.password):
+                limiter.failed(signer, ip)
+                db.log(conn, signer, "signature.failed", a["story_id"], {"analysis_id": analysis_id})
+                raise HTTPException(403, "Signature not applied: the password is wrong")
+            signed_at = db.now()
+            record_hash = signature_hash(dict(a), body.decision, final, meaning, signer, signed_at)
+            try:  # UNIQUE(analysis_id) also stops two signatures racing
+                conn.execute(
+                    "INSERT INTO signatures (analysis_id, signer, meaning, signed_at, record_hash)"
+                    " VALUES (?, ?, ?, ?, ?)", (analysis_id, signer, meaning, signed_at, record_hash))
+            except Exception as exc:
+                if db.is_unique_violation(exc):
+                    raise HTTPException(409, "This analysis has already been signed") from exc
+                raise
+            signature = {"meaning": meaning, "signed_at": signed_at, "record_hash": record_hash}
+
         conn.execute(
             "UPDATE analyses SET status = ?, final_risk = ?, reviewer = ? WHERE id = ?",
             (status, final, body.reviewer, analysis_id),
@@ -173,7 +219,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
         conn.commit()
         db.log(conn, body.reviewer, f"analysis.{body.decision}", a["story_id"],
                {"analysis_id": analysis_id, "suggested_risk": suggested,
-                "final_risk": final, "comment": body.comment})
+                "final_risk": final, "comment": body.comment,
+                "signature": signature or "unsigned (login is off)"})
         return _story_row(conn, a["story_id"])
 
     @app.get("/api/audit")
@@ -191,16 +238,19 @@ def create_app(db_path: str | None = None) -> FastAPI:
             if not a:
                 continue
             res = a["result"]
+            sig = a.get("signature") or {}
             for tc in res["test_cases"]:
                 rows.append([
                     s.get("requirement_id") or "", s["key"], s["title"], tc["covers_criterion"],
                     tc["id"], tc["title"], a.get("final_risk") or f"{res['risk']} (unreviewed)",
-                    res["test_approach"], a["status"], a.get("reviewer") or "", "Not run",
+                    res["test_approach"], a["status"], a.get("reviewer") or "",
+                    sig.get("meaning", ""), sig.get("signed_at", ""), "Not run",
                 ])
         return rows
 
     RTM_HEADER = ["Requirement", "Story", "Story title", "Acceptance criterion", "Test ID",
-                  "Test title", "GxP risk", "Test approach", "Review status", "Reviewer", "Result"]
+                  "Test title", "GxP risk", "Test approach", "Review status", "Reviewer",
+                  "Signature meaning", "Signed at (UTC)", "Result"]
 
     @app.get("/api/rtm.csv")
     def rtm_csv():
