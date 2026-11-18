@@ -12,10 +12,10 @@ import json
 import os
 from pathlib import Path
 from typing import Literal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, unquote
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import ai, auth, db
@@ -62,6 +62,36 @@ def signature_hash(analysis: dict, decision: str, final_risk: str | None, meanin
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+class TestRunIn(BaseModel):
+    result: Literal["Pass", "Fail", "Blocked"]
+    notes: str = ""
+    evidence_id: int | None = None
+    actor: str = "anonymous"
+
+
+# Evidence files: screenshots, PDFs and plain-text logs. Anything else could
+# run in a browser, so it isn't accepted.
+EVIDENCE_TYPES = {
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+    "application/pdf", "text/plain", "text/csv",
+}
+EVIDENCE_MAX_BYTES = 4 * 1024 * 1024  # stays under Vercel's 4.5 MB request limit
+
+
+def _latest_runs(conn, analysis_id: int) -> dict:
+    """Latest run per test case, plus how many times it has been run."""
+    rows = conn.execute(
+        "SELECT r.*, e.name AS evidence_name, e.sha256 AS evidence_sha256 FROM test_runs r"
+        " LEFT JOIN evidence e ON e.id = r.evidence_id WHERE r.analysis_id = ? ORDER BY r.id",
+        (analysis_id,)).fetchall()
+    runs: dict = {}
+    for r in rows:
+        r = dict(r)
+        r["run_count"] = runs.get(r["test_id"], {}).get("run_count", 0) + 1
+        runs[r["test_id"]] = r
+    return runs
+
+
 def _story_row(conn, story_id: int) -> dict:
     s = conn.execute("SELECT * FROM stories WHERE id = ?", (story_id,)).fetchone()
     if not s:
@@ -77,6 +107,7 @@ def _story_row(conn, story_id: int) -> dict:
         sig = conn.execute("SELECT signer, meaning, signed_at, record_hash FROM signatures"
                            " WHERE analysis_id = ?", (analysis["id"],)).fetchone()
         analysis["signature"] = dict(sig) if sig else None
+        analysis["test_runs"] = _latest_runs(conn, analysis["id"])
         story["analysis"] = analysis
     return story
 
@@ -223,6 +254,67 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 "signature": signature or "unsigned (login is off)"})
         return _story_row(conn, a["story_id"])
 
+    @app.post("/api/evidence")
+    async def upload_evidence(request: Request):
+        """Raw file in the body; file name in the X-Filename header (URL-encoded)."""
+        ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+        if ctype not in EVIDENCE_TYPES:
+            raise HTTPException(415, "Evidence must be an image (PNG, JPEG, GIF, WebP), a PDF, or a text/CSV file")
+        if int(request.headers.get("content-length") or 0) > EVIDENCE_MAX_BYTES:
+            raise HTTPException(413, "Evidence files can be up to 4 MB")
+        data = await request.body()
+        if not data:
+            raise HTTPException(422, "The file is empty")
+        if len(data) > EVIDENCE_MAX_BYTES:
+            raise HTTPException(413, "Evidence files can be up to 4 MB")
+        name = unquote(request.headers.get("x-filename", "evidence"))[:200] or "evidence"
+        who = auth.current_user(request) or unquote(request.headers.get("x-actor", "anonymous"))[:100]
+        sha = hashlib.sha256(data).hexdigest()
+        cur = conn.execute(
+            "INSERT INTO evidence (name, content_type, size, sha256, data, uploaded_by, uploaded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)", (name, ctype, len(data), sha, data, who, db.now()))
+        db.log(conn, who, "evidence.uploaded", None,
+               {"evidence_id": cur.lastrowid, "name": name, "sha256": sha, "size": len(data)})
+        return {"id": cur.lastrowid, "name": name, "sha256": sha, "size": len(data)}
+
+    @app.get("/api/evidence/{evidence_id}")
+    def get_evidence(evidence_id: int):
+        e = conn.execute("SELECT * FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not e:
+            raise HTTPException(404, "Evidence not found")
+        inline = e["content_type"].startswith("image/") or e["content_type"] == "application/pdf"
+        disposition = "inline" if inline else "attachment"
+        return Response(bytes(e["data"]), media_type=e["content_type"], headers={
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(e['name'])}",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+            "X-Evidence-SHA256": e["sha256"],
+        })
+
+    @app.post("/api/analyses/{analysis_id}/tests/{test_id}/runs")
+    def record_run(analysis_id: int, test_id: str, body: TestRunIn, request: Request):
+        who = auth.current_user(request) or body.actor
+        a = conn.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+        if not a:
+            raise HTTPException(404, "Analysis not found")
+        if a["status"] != "approved":
+            raise HTTPException(409, "Run tests only after the analysis is approved")
+        if test_id not in {tc["id"] for tc in json.loads(a["result"])["test_cases"]}:
+            raise HTTPException(404, f"No test {test_id} in this analysis")
+        if body.result != "Pass" and not body.notes.strip():
+            raise HTTPException(422, "Describe what happened when a test fails or is blocked")
+        if body.evidence_id is not None and not conn.execute(
+                "SELECT id FROM evidence WHERE id = ?", (body.evidence_id,)).fetchone():
+            raise HTTPException(422, "Evidence not found")
+        conn.execute(
+            "INSERT INTO test_runs (analysis_id, test_id, result, notes, evidence_id, executed_by, executed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (analysis_id, test_id, body.result, body.notes, body.evidence_id, who, db.now()))
+        db.log(conn, who, "test.executed", a["story_id"],
+               {"analysis_id": analysis_id, "test_id": test_id, "result": body.result,
+                "notes": body.notes, "evidence_id": body.evidence_id})
+        return _story_row(conn, a["story_id"])
+
     @app.get("/api/audit")
     def audit(story_id: int | None = None):
         q, args = "SELECT * FROM audit_log", ()
@@ -239,18 +331,25 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 continue
             res = a["result"]
             sig = a.get("signature") or {}
+            runs = a.get("test_runs") or {}
             for tc in res["test_cases"]:
+                run = runs.get(tc["id"]) or {}
+                evidence = (f"{run['evidence_name']} (sha256 {run['evidence_sha256']})"
+                            if run.get("evidence_name") else "")
                 rows.append([
                     s.get("requirement_id") or "", s["key"], s["title"], tc["covers_criterion"],
                     tc["id"], tc["title"], a.get("final_risk") or f"{res['risk']} (unreviewed)",
                     res["test_approach"], a["status"], a.get("reviewer") or "",
-                    sig.get("meaning", ""), sig.get("signed_at", ""), "Not run",
+                    sig.get("meaning", ""), sig.get("signed_at", ""),
+                    run.get("result", "Not run"), run.get("executed_by", ""), run.get("executed_at", ""),
+                    run.get("notes", ""), evidence,
                 ])
         return rows
 
     RTM_HEADER = ["Requirement", "Story", "Story title", "Acceptance criterion", "Test ID",
                   "Test title", "GxP risk", "Test approach", "Review status", "Reviewer",
-                  "Signature meaning", "Signed at (UTC)", "Result"]
+                  "Signature meaning", "Signed at (UTC)", "Result", "Executed by",
+                  "Executed at (UTC)", "Test notes", "Evidence"]
 
     @app.get("/api/rtm.csv")
     def rtm_csv():

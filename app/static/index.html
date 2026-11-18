@@ -34,6 +34,11 @@
   .warn { background:#fff7e6; border:1px solid #f3d9a4; border-radius:6px; padding:8px 10px; font-size:13px; margin-top:8px; }
   .review { background:var(--bg); border-radius:8px; padding:12px; margin-top:12px; }
   .review select, .review input { width:auto; }
+  .Pass { background:var(--low); } .Fail { background:var(--high); } .Blocked { background:var(--med); }
+  .run { margin-top:8px; font-size:13px; }
+  .runform { margin-top:6px; font-size:13px; }
+  .runform summary { cursor:pointer; color:var(--accent); }
+  .runform input[type=file] { width:auto; border:0; padding:0; }
   .sig { margin-top:6px; font-size:13px; border-left:3px solid var(--accent); padding-left:8px; }
   #mode { font-size:12px; }
   .audit { font-family: ui-monospace, Menlo, monospace; font-size:12px; max-height:260px; overflow:auto; white-space:pre-wrap; }
@@ -99,13 +104,63 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-function renderTest(tc) {
+function renderRun(tc, a, i) {
+  if (a.status !== "approved") return "";
+  const run = (a.test_runs || {})[tc.id];
+  const fmt = (t) => esc(String(t).replace("T", " ").replace("+00:00", " UTC"));
+  const last = run
+    ? `<div class="run"><span class="badge ${esc(run.result)}">${esc(run.result)}</span>
+        by <strong>${esc(run.executed_by)}</strong> · ${fmt(run.executed_at)}${run.run_count > 1 ? ` · run ${run.run_count}` : ""}
+        ${run.notes ? `<div class="muted">${esc(run.notes)}</div>` : ""}
+        ${run.evidence_id ? `<div class="muted">Evidence: <a href="/api/evidence/${run.evidence_id}" target="_blank" rel="noopener">${esc(run.evidence_name)}</a>
+          <span title="${esc(run.evidence_sha256)}">sha256 ${esc(String(run.evidence_sha256).slice(0, 12))}…</span></div>` : ""}</div>`
+    : `<div class="run muted">Not run yet</div>`;
+  const k = `${a.id}-${i}`;
+  return `${last}
+    <details class="runform"><summary>${run ? "Record another run" : "Record result"}</summary>
+      <div class="row" style="margin-top:8px">
+        <select id="res-${k}"><option>Pass</option><option>Fail</option><option>Blocked</option></select>
+        <input id="notes-${k}" placeholder="Notes (needed for Fail/Blocked)" style="flex:1;min-width:180px">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="file-${k}" type="file" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/csv">
+        <button data-test="${esc(tc.id)}" onclick="recordRun(${a.id}, '${k}', this)">Save result</button>
+      </div>
+      <div class="muted" style="margin-top:4px">Evidence: screenshot, PDF or text log, up to 4 MB. Saved results can't be edited; record another run instead.</div>
+    </details>`;
+}
+
+function renderTest(tc, a, i) {
   const steps = (tc.steps || []).length
     ? `<ol>${tc.steps.map(s => `<li>${esc(s.action)} <span class="muted">→ ${esc(s.expected)}</span></li>`).join("")}</ol>`
     : `<div class="muted">Scenario: ${esc(tc.scenario)}</div>`;
   return `<div class="tc"><strong>${esc(tc.id)}</strong> ${esc(tc.title)}
     <div class="muted">Covers: ${esc(tc.covers_criterion)}</div>${steps}
-    <div class="muted">Pass when: ${esc(tc.pass_condition)}</div></div>`;
+    <div class="muted">Pass when: ${esc(tc.pass_condition)}</div>
+    ${renderRun(tc, a, i)}</div>`;
+}
+
+async function recordRun(aid, k, btn) {
+  const testId = btn.dataset.test;
+  const result = $(`res-${k}`).value, notes = $(`notes-${k}`).value;
+  if (result !== "Pass" && !notes.trim()) { alert("Describe what happened when a test fails or is blocked."); return; }
+  btn.disabled = true; btn.textContent = "Saving…";
+  try {
+    let evidence_id = null;
+    const file = $(`file-${k}`).files[0];
+    if (file) {
+      if (file.size > 4 * 1024 * 1024) throw new Error("Evidence files can be up to 4 MB");
+      const up = await api("/api/evidence", { method: "POST", body: file, headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Filename": encodeURIComponent(file.name),
+        "X-Actor": encodeURIComponent($("actor").value || "anonymous"),
+      }});
+      evidence_id = up.id;
+    }
+    await api(`/api/analyses/${aid}/tests/${encodeURIComponent(testId)}/runs`, { method: "POST",
+      body: JSON.stringify({ result, notes, evidence_id, actor: $("actor").value || "anonymous" }) });
+    refresh();
+  } catch (e) { alert(e.message); btn.disabled = false; btn.textContent = "Save result"; }
 }
 
 function renderStory(s) {
@@ -147,7 +202,7 @@ function renderStory(s) {
     <h3 style="margin-top:8px">${esc(s.title)}</h3>
     <div class="muted">${esc(r.risk_rationale)}</div>
     ${(r.open_questions || []).length ? `<div class="warn"><strong>Open questions:</strong> ${r.open_questions.map(esc).join(" · ")}</div>` : ""}
-    ${r.test_cases.map(renderTest).join("")}
+    ${r.test_cases.map((tc, i) => renderTest(tc, a, i)).join("")}
     ${review}
   </div>`;
 }

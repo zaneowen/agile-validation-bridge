@@ -146,12 +146,19 @@ def test_postgres_flow_and_append_only(monkeypatch):
         assert r.json()["analysis"]["final_risk"] == "Medium"
         assert [e["action"] for e in c.get("/api/audit").json()][0] == "analysis.override"
         assert c.get("/api/rtm.csv").status_code == 200
+        up = c.post("/api/evidence", content=PNG, headers={"content-type": "image/png"}).json()
+        tid = s["analysis"]["result"]["test_cases"][0]["id"]
+        run = c.post(f"/api/analyses/{s['analysis']['id']}/tests/{tid}/runs",
+                     json={"result": "Pass", "evidence_id": up["id"]}).json()["analysis"]["test_runs"][tid]
+        assert run["evidence_sha256"] == up["sha256"]
+        assert c.get(f"/api/evidence/{up['id']}").content == PNG  # bytea round trip
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute("INSERT INTO signatures (analysis_id, signer, meaning, signed_at, record_hash)"
                          " VALUES (%s, 'qa', 'Approved', 'now', 'h')", (s["analysis"]["id"],))
             for sql in ("DELETE FROM audit_log", "UPDATE audit_log SET actor = 'x'", "TRUNCATE audit_log",
-                        "DELETE FROM signatures", "UPDATE signatures SET meaning = 'x'", "TRUNCATE signatures"):
-                with pytest.raises(psycopg.errors.RaiseException):
+                        "DELETE FROM signatures", "UPDATE signatures SET meaning = 'x'", "TRUNCATE signatures",
+                        "DELETE FROM test_runs", "TRUNCATE test_runs", "DELETE FROM evidence", "TRUNCATE evidence"):
+                with pytest.raises((psycopg.errors.RaiseException, psycopg.errors.FeatureNotSupported)):
                     conn.execute(sql)
     finally:
         with psycopg.connect(base, autocommit=True) as admin:
@@ -255,3 +262,50 @@ def test_reviews_without_login_are_unsigned(client):
     a = client.post(f"/api/analyses/{aid}/review", json={"reviewer": "zane", "decision": "approve"}).json()["analysis"]
     assert a["status"] == "approved" and a["signature"] is None
     assert client.get("/api/audit").json()[0]["detail"]["signature"] == "unsigned (login is off)"
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4  # not a real image, just binary bytes
+
+
+def test_test_runs_with_evidence(client):
+    s = client.post("/api/stories", json=STORY).json()
+    aid = s["analysis"]["id"]
+    tid = s["analysis"]["result"]["test_cases"][0]["id"]
+    run_url = f"/api/analyses/{aid}/tests/{tid}/runs"
+
+    assert client.post(run_url, json={"result": "Pass"}).status_code == 409  # not approved yet
+    client.post(f"/api/analyses/{aid}/review", json={"reviewer": "zane", "decision": "approve"})
+
+    assert client.post(run_url, json={"result": "Fail"}).status_code == 422  # needs notes
+    assert client.post(f"/api/analyses/{aid}/tests/NOPE/runs", json={"result": "Pass"}).status_code == 404
+
+    bad = client.post("/api/evidence", content=b"<script>alert(1)</script>", headers={"content-type": "text/html"})
+    assert bad.status_code == 415
+    big = client.post("/api/evidence", content=b"x" * (4 * 1024 * 1024 + 1), headers={"content-type": "text/plain"})
+    assert big.status_code == 413
+
+    up = client.post("/api/evidence", content=PNG,
+                     headers={"content-type": "image/png", "x-filename": "login%20screen.png"}).json()
+    assert up["name"] == "login screen.png" and len(up["sha256"]) == 64
+
+    client.post(run_url, json={"result": "Fail", "notes": "Lockout not enforced"})
+    r = client.post(run_url, json={"result": "Pass", "notes": "Fixed in build 42", "evidence_id": up["id"],
+                                   "actor": "tester1"})
+    run = r.json()["analysis"]["test_runs"][tid]
+    assert run["result"] == "Pass" and run["run_count"] == 2 and run["executed_by"] == "tester1"
+    assert run["evidence_name"] == "login screen.png" and run["evidence_sha256"] == up["sha256"]
+
+    ev = client.get(f"/api/evidence/{up['id']}")
+    assert ev.content == PNG and ev.headers["content-type"] == "image/png"
+    assert ev.headers["x-content-type-options"] == "nosniff" and "sandbox" in ev.headers["content-security-policy"]
+
+    rtm = client.get("/api/rtm.csv").text.splitlines()
+    assert "Executed by" in rtm[0] and "Evidence" in rtm[0]
+    assert ",Pass,tester1," in rtm[1] and up["sha256"] in rtm[1]
+    assert ",Not run," in rtm[2]  # second test case untouched
+
+    conn = sqlite3.connect(client.db_path)
+    for sql in ("UPDATE test_runs SET result = 'Pass'", "DELETE FROM test_runs",
+                "UPDATE evidence SET name = 'x'", "DELETE FROM evidence"):
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(sql)

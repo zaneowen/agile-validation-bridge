@@ -8,7 +8,8 @@ Paste a user story and the app:
 2. **Drafts test cases** scaled to that risk: scripted for High, unscripted for Medium, ad hoc for Low
 3. **Requires a human decision**: approve, override (with a comment) or reject. With login on, the decision is an **electronic signature**: the reviewer re-enters their password and picks a meaning (Approved / Reviewed; rejections are signed as Rejected). The signature records name, UTC time and meaning plus a SHA-256 hash of exactly what was signed, can't be edited or deleted, and each analysis can be signed only once
 4. **Logs everything** to an append-only audit trail (SQLite triggers block edits and deletes)
-5. **Exports a traceability matrix** (requirement → story → criterion → test) to Excel or CSV
+5. **Records test execution**: after approval, testers mark each test Pass, Fail or Blocked (a note is required for Fail and Blocked) and attach evidence: a screenshot, PDF or text log up to 4 MB. Evidence is stored in the database with its SHA-256, served only to signed-in users, and like test runs can't be edited or deleted; re-running a test adds a new record
+6. **Exports a traceability matrix** (requirement → story → criterion → test → result → evidence) to Excel or CSV
 
 This is the standalone prototype. The plan is to put the same backend behind a Jira Forge app later.
 
@@ -94,6 +95,9 @@ Mount a volume at `/data` so the SQLite database survives restarts, or pass `DAT
 | GET | `/api/stories` | List stories with their latest analysis |
 | GET | `/api/me` | Logged-in user (null when login is off) |
 | POST | `/api/analyses/{id}/review` | Approve, override or reject a suggestion |
+| POST | `/api/evidence` | Upload an evidence file (raw body, `X-Filename` header) |
+| GET | `/api/evidence/{id}` | Download an evidence file |
+| POST | `/api/analyses/{id}/tests/{test_id}/runs` | Record a test result |
 | GET | `/api/audit` | Audit trail, newest first (`?story_id=` to filter) |
 | GET | `/api/rtm.xlsx`, `/api/rtm.csv` | Traceability matrix export |
 
@@ -119,7 +123,8 @@ tests/         API tests (mock AI)
 - [x] Postgres for the hosted copy (Vercel + Neon)
 - [ ] Real user accounts (SSO) in place of shared passwords
 - [ ] Re-run analysis when a story changes, with a diff in the audit trail
-- [ ] Test execution results (pass/fail + evidence upload) feeding the RTM
+- [x] Test execution results (pass/fail + evidence upload) feeding the RTM
+- [x] Electronic signatures on reviews
 - [ ] PDF validation summary report
 
 ## IP note
