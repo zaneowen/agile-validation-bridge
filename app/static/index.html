@@ -92,6 +92,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (res.status === 401) { location.href = "/login"; throw new Error("Signed out"); }
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
   return res.json();
 }
@@ -183,7 +184,7 @@ api("/api/health").then(h => { $("mode").textContent = h.mock_ai ? "Mock AI (no 
 api("/api/me").then(m => {
   if (!m.user) return;  // no login configured: keep the free-text name
   $("actor").value = m.user;
-  $("actorWrap").innerHTML = `<div class="muted" style="margin-top:10px">Signed in as <strong>${esc(m.user)}</strong></div><input id="actor" type="hidden" value="${esc(m.user)}">`;
+  $("actorWrap").innerHTML = `<div class="muted" style="margin-top:10px">Signed in as <strong>${esc(m.user)}</strong> · <a href="/logout">Sign out</a></div><input id="actor" type="hidden" value="${esc(m.user)}">`;
 }).catch(() => {});
 refresh();
 </script>

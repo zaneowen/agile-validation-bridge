@@ -57,7 +57,7 @@ The repo ships a `Dockerfile` (works on any container host) and a `render.yaml` 
 AVB_USERS=qa.lead:a-long-password,dev1:another-long-password
 ```
 
-When login is on, the audit trail records the logged-in username, not the free-text name field. That gives you attributable records, which is closer to what Part 11 expects.
+When login is on, people sign in on a sign-in page (sessions last 12 hours), and the audit trail records the logged-in username, not the free-text name field. Scripts can send the same username and password as HTTP Basic auth. That gives you attributable records, which is closer to what Part 11 expects.
 
 ### Render (simplest)
 

@@ -11,9 +11,10 @@ import json
 import os
 from pathlib import Path
 from typing import Literal
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import ai, auth, db
@@ -65,11 +66,36 @@ def create_app(db_path: str | None = None) -> FastAPI:
     conn = db.connect(db_path)
     users = auth.load_users()
     if users:
-        app.add_middleware(auth.BasicAuthMiddleware, users=users)
+        app.add_middleware(auth.LoginMiddleware, users=users)
 
     @app.get("/", include_in_schema=False)
     def index():
         return FileResponse(STATIC / "index.html")
+
+    @app.get("/login", include_in_schema=False)
+    def login_page():
+        if not users:
+            return RedirectResponse("/", status_code=303)
+        return FileResponse(STATIC / "login.html")
+
+    @app.post("/login", include_in_schema=False)
+    async def login(request: Request):
+        # Parse the form by hand so we don't need python-multipart.
+        form = parse_qs((await request.body()).decode("utf-8", "replace"))
+        name = form.get("username", [""])[0].strip()
+        pw = form.get("password", [""])[0]
+        if not users or not auth.check_password(users, name, pw):
+            return RedirectResponse("/login?error=1", status_code=303)
+        res = RedirectResponse("/", status_code=303)
+        res.set_cookie(auth.COOKIE, auth.make_session(name), max_age=auth.SESSION_SECONDS,
+                       httponly=True, samesite="lax", secure=request.url.scheme == "https")
+        return res
+
+    @app.get("/logout", include_in_schema=False)
+    def logout():
+        res = RedirectResponse("/login" if users else "/", status_code=303)
+        res.delete_cookie(auth.COOKIE)
+        return res
 
     @app.get("/api/health")
     def health():
