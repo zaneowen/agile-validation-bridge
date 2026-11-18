@@ -1,4 +1,5 @@
 import io
+import os
 import sqlite3
 
 import pytest
@@ -119,3 +120,36 @@ def test_sign_in_page_sets_session(tmp_path, monkeypatch):
     assert c.get("/api/me").status_code == 200
     c.get("/logout")
     assert c.get("/api/me").status_code == 401
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="set TEST_DATABASE_URL (an unpooled URL) to test Postgres")
+def test_postgres_flow_and_append_only(monkeypatch):
+    import uuid
+
+    import psycopg
+
+    base = os.environ["TEST_DATABASE_URL"]
+    schema = f"avb_test_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(base, autocommit=True) as admin:
+        admin.execute(f"CREATE SCHEMA {schema}")
+    try:
+        sep = "&" if "?" in base else "?"
+        url = f"{base}{sep}options=-csearch_path%3D{schema}"
+        monkeypatch.setenv("AVB_MOCK_AI", "1")
+        monkeypatch.delenv("AVB_USERS", raising=False)
+        monkeypatch.setenv("DATABASE_URL", url)
+        c = TestClient(create_app())
+        s = c.post("/api/stories", json=STORY).json()
+        assert s["id"] and s["analysis"]["result"]["risk"] == "High"
+        r = c.post(f"/api/analyses/{s['analysis']['id']}/review",
+                   json={"reviewer": "qa", "decision": "override", "final_risk": "Medium", "comment": "ok"})
+        assert r.json()["analysis"]["final_risk"] == "Medium"
+        assert [e["action"] for e in c.get("/api/audit").json()][0] == "analysis.override"
+        assert c.get("/api/rtm.csv").status_code == 200
+        with psycopg.connect(url, autocommit=True) as conn:
+            for sql in ("DELETE FROM audit_log", "UPDATE audit_log SET actor = 'x'", "TRUNCATE audit_log"):
+                with pytest.raises(psycopg.errors.RaiseException):
+                    conn.execute(sql)
+    finally:
+        with psycopg.connect(base, autocommit=True) as admin:
+            admin.execute(f"DROP SCHEMA {schema} CASCADE")

@@ -1,13 +1,20 @@
-"""SQLite storage: stories, AI analyses, and an append-only audit log."""
+"""Storage: stories, AI analyses, and an append-only audit log.
+
+Uses Postgres when DATABASE_URL is set (the hosted copy on Vercel + Neon), and
+a local SQLite file otherwise (running on your PC, and the tests). Both enforce
+the same rule: audit_log rows can be inserted but never updated or deleted.
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 
-SCHEMA = """
+SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS stories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT NOT NULL,
@@ -41,22 +48,158 @@ CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 """
 
+POSTGRES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS stories (
+    id BIGSERIAL PRIMARY KEY,
+    key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    acceptance_criteria TEXT NOT NULL,
+    requirement_id TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS analyses (
+    id BIGSERIAL PRIMARY KEY,
+    story_id BIGINT NOT NULL REFERENCES stories(id),
+    result TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    final_risk TEXT,
+    reviewer TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    at TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    story_id BIGINT,
+    detail TEXT NOT NULL
+);
+CREATE OR REPLACE FUNCTION audit_log_append_only() RETURNS trigger AS $$
+BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER audit_no_update BEFORE UPDATE ON audit_log
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER audit_no_delete BEFORE DELETE ON audit_log
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit_log
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+"""
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def connect(path: str | None = None) -> sqlite3.Connection:
-    path = path or os.environ.get("AVB_DB", "avb.db")
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    return conn
+class Result:
+    """Rows fetched eagerly, so the connection lock is released right away."""
+
+    def __init__(self, rows: list, lastrowid: int | None = None):
+        self.rows = rows
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+    def __iter__(self):
+        return iter(self.rows)
 
 
-def log(conn: sqlite3.Connection, actor: str, action: str, story_id: int | None, detail: dict) -> None:
+class SqliteDB:
+    def __init__(self, path: str):
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SQLITE_SCHEMA)
+        self.lock = threading.Lock()
+
+    def execute(self, sql: str, args: tuple = ()) -> Result:
+        with self.lock:
+            cur = self.conn.execute(sql, args)
+            rows = cur.fetchall()
+            self.conn.commit()
+            return Result(rows, cur.lastrowid)
+
+    def commit(self) -> None:  # every execute already commits
+        pass
+
+
+class PostgresDB:
+    """One autocommit connection per instance, reopened if it drops.
+
+    SQL in main.py uses SQLite's "?" placeholders; they are converted here.
+    INSERTs get "RETURNING id" so lastrowid works the same way.
+    """
+
+    def __init__(self, url: str):
+        self.url = url
+        self.lock = threading.Lock()
+        self.conn = None
+        self._connect()
+        with self.conn.transaction():
+            # serialise schema setup across instances that start at the same time
+            self.conn.execute("SELECT pg_advisory_xact_lock(724411)")
+            self.conn.execute(POSTGRES_SCHEMA)
+
+    def _connect(self):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        self.conn = psycopg.connect(self.url, autocommit=True, row_factory=dict_row,
+                                    prepare_threshold=None)  # pooled (pgbouncer) URLs can't keep prepared statements
+        self.last_used = time.monotonic()
+
+    def execute(self, sql: str, args: tuple = ()) -> Result:
+        import psycopg
+
+        sql = sql.replace("?", "%s")
+        is_insert = sql.lstrip().upper().startswith("INSERT")
+        if is_insert:
+            sql += " RETURNING id"
+        is_read = sql.lstrip().upper().startswith("SELECT")
+        with self.lock:
+            self._ensure_alive()
+            for attempt in (1, 2):
+                try:
+                    cur = self.conn.execute(sql, args)
+                    rows = cur.fetchall() if cur.description else []
+                    break
+                except psycopg.OperationalError:
+                    # Only reads are retried: a write may have landed before the
+                    # connection dropped, and the audit trail must not get duplicates.
+                    if attempt == 2 or not is_read:
+                        raise
+                    self._connect()
+            self.last_used = time.monotonic()
+        return Result(rows, rows[0]["id"] if is_insert and rows else None)
+
+    def _ensure_alive(self) -> None:
+        import psycopg
+
+        if self.conn.closed or self.conn.broken:
+            self._connect()
+        elif time.monotonic() - self.last_used > 30:  # idle instance: the server may have closed it
+            try:
+                self.conn.execute("SELECT 1")
+            except psycopg.OperationalError:
+                self._connect()
+
+    def commit(self) -> None:  # autocommit
+        pass
+
+
+def connect(path: str | None = None):
+    url = os.environ.get("DATABASE_URL")
+    if url and not path:
+        return PostgresDB(url)
+    return SqliteDB(path or os.environ.get("AVB_DB", "avb.db"))
+
+
+def log(conn, actor: str, action: str, story_id: int | None, detail: dict) -> None:
     conn.execute(
         "INSERT INTO audit_log (at, actor, action, story_id, detail) VALUES (?, ?, ?, ?, ?)",
         (now(), actor, action, story_id, json.dumps(detail)),
     )
-    conn.commit()

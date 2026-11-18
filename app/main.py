@@ -88,7 +88,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
             return RedirectResponse("/login?error=1", status_code=303)
         res = RedirectResponse("/", status_code=303)
         res.set_cookie(auth.COOKIE, auth.make_session(name), max_age=auth.SESSION_SECONDS,
-                       httponly=True, samesite="lax", secure=request.url.scheme == "https")
+                       httponly=True, samesite="lax", secure=request.url.scheme == "https"
+                       or request.headers.get("x-forwarded-proto") == "https")
         return res
 
     @app.get("/logout", include_in_schema=False)
