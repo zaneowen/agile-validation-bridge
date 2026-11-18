@@ -60,6 +60,34 @@ CREATE TRIGGER IF NOT EXISTS signatures_no_update BEFORE UPDATE ON signatures
 BEGIN SELECT RAISE(ABORT, 'signatures are permanent'); END;
 CREATE TRIGGER IF NOT EXISTS signatures_no_delete BEFORE DELETE ON signatures
 BEGIN SELECT RAISE(ABORT, 'signatures are permanent'); END;
+CREATE TABLE IF NOT EXISTS evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    data BLOB NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS test_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    analysis_id INTEGER NOT NULL REFERENCES analyses(id),
+    test_id TEXT NOT NULL,
+    result TEXT NOT NULL,
+    notes TEXT NOT NULL,
+    evidence_id INTEGER REFERENCES evidence(id),
+    executed_by TEXT NOT NULL,
+    executed_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS evidence_no_update BEFORE UPDATE ON evidence
+BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS evidence_no_delete BEFORE DELETE ON evidence
+BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS test_runs_no_update BEFORE UPDATE ON test_runs
+BEGIN SELECT RAISE(ABORT, 'test_runs is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS test_runs_no_delete BEFORE DELETE ON test_runs
+BEGIN SELECT RAISE(ABORT, 'test_runs is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log
@@ -108,6 +136,26 @@ CREATE TABLE IF NOT EXISTS signatures (
     signed_at TEXT NOT NULL,
     record_hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evidence (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size BIGINT NOT NULL,
+    sha256 TEXT NOT NULL,
+    data BYTEA NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS test_runs (
+    id BIGSERIAL PRIMARY KEY,
+    analysis_id BIGINT NOT NULL REFERENCES analyses(id),
+    test_id TEXT NOT NULL,
+    result TEXT NOT NULL,
+    notes TEXT NOT NULL,
+    evidence_id BIGINT REFERENCES evidence(id),
+    executed_by TEXT NOT NULL,
+    executed_at TEXT NOT NULL
+);
 CREATE OR REPLACE FUNCTION audit_log_append_only() RETURNS trigger AS $$
 BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END;
 $$ LANGUAGE plpgsql;
@@ -122,6 +170,18 @@ CREATE OR REPLACE TRIGGER signatures_no_update BEFORE UPDATE ON signatures
 CREATE OR REPLACE TRIGGER signatures_no_delete BEFORE DELETE ON signatures
     FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
 CREATE OR REPLACE TRIGGER signatures_no_truncate BEFORE TRUNCATE ON signatures
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER evidence_no_update BEFORE UPDATE ON evidence
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER evidence_no_delete BEFORE DELETE ON evidence
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER evidence_no_truncate BEFORE TRUNCATE ON evidence
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER test_runs_no_update BEFORE UPDATE ON test_runs
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER test_runs_no_delete BEFORE DELETE ON test_runs
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+CREATE OR REPLACE TRIGGER test_runs_no_truncate BEFORE TRUNCATE ON test_runs
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
 """
 
