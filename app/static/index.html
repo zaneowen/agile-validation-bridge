@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agile-to-Validation Bridge</title>
+<style>
+  :root { --ink:#1b1f24; --muted:#5b6470; --line:#dde1e6; --bg:#f6f7f9; --card:#fff;
+          --accent:#2457d6; --high:#c2362b; --med:#b7791f; --low:#2f855a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; color:var(--ink); background:var(--bg); }
+  header { padding:20px 24px; background:var(--card); border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--muted); font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:24px; display:grid; grid-template-columns: 380px 1fr; gap:24px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  label { display:block; font-size:13px; font-weight:600; margin:12px 0 4px; }
+  input, textarea, select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  textarea { min-height:80px; resize:vertical; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  button.secondary { background:#fff; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.6; cursor:wait; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:99px; font-size:12px; font-weight:700; color:#fff; }
+  .High { background:var(--high); } .Medium { background:var(--med); } .Low { background:var(--low); }
+  .pill { display:inline-block; padding:2px 8px; border-radius:99px; font-size:12px; border:1px solid var(--line); color:var(--muted); }
+  .story { margin-bottom:16px; }
+  .story h3 { margin:0 0 4px; font-size:16px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .tc { border-top:1px solid var(--line); padding:10px 0; }
+  .tc ol { margin:6px 0 0 18px; padding:0; }
+  .tc li { margin-bottom:4px; }
+  .warn { background:#fff7e6; border:1px solid #f3d9a4; border-radius:6px; padding:8px 10px; font-size:13px; margin-top:8px; }
+  .review { background:var(--bg); border-radius:8px; padding:12px; margin-top:12px; }
+  .review select, .review input { width:auto; }
+  #mode { font-size:12px; }
+  .audit { font-family: ui-monospace, Menlo, monospace; font-size:12px; max-height:260px; overflow:auto; white-space:pre-wrap; }
+  .empty { color:var(--muted); text-align:center; padding:40px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Agile-to-Validation Bridge</h1>
+    <div class="sub">User stories in, risk-rated test drafts and a traceability matrix out. AI drafts, humans decide.</div>
+  </div>
+  <div class="row">
+    <span id="mode" class="pill">checking…</span>
+    <a href="/api/rtm.xlsx"><button class="secondary">Export RTM (Excel)</button></a>
+    <a href="/api/rtm.csv"><button class="secondary">CSV</button></a>
+  </div>
+</header>
+
+<main>
+  <section>
+    <form class="card" id="storyForm">
+      <strong>New user story</strong>
+      <label for="key">Story key</label>
+      <input id="key" required placeholder="LIMS-142">
+      <label for="req">Requirement ID (optional)</label>
+      <input id="req" placeholder="URS-017">
+      <label for="title">Title</label>
+      <input id="title" required placeholder="Reviewer e-signature on batch results">
+      <label for="desc">Description</label>
+      <textarea id="desc" placeholder="As a QA reviewer I want to…"></textarea>
+      <label for="ac">Acceptance criteria (one per line)</label>
+      <textarea id="ac" placeholder="Signature requires re-entering the password&#10;Signed results cannot be edited"></textarea>
+      <label for="actor">Your name</label>
+      <input id="actor" value="zane">
+      <div class="row" style="margin-top:14px">
+        <button type="submit" id="submitBtn">Analyze story</button>
+        <button type="button" class="secondary" id="sampleBtn">Load sample</button>
+      </div>
+    </form>
+
+    <div class="card" style="margin-top:16px">
+      <strong>Audit trail</strong>
+      <div class="muted">Append-only. Every AI suggestion and human decision.</div>
+      <div class="audit" id="audit"></div>
+    </div>
+  </section>
+
+  <section id="stories"><div class="card empty">No stories yet. Add one or load the sample.</div></section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+  return res.json();
+}
+
+function renderTest(tc) {
+  const steps = (tc.steps || []).length
+    ? `<ol>${tc.steps.map(s => `<li>${esc(s.action)} <span class="muted">→ ${esc(s.expected)}</span></li>`).join("")}</ol>`
+    : `<div class="muted">Scenario: ${esc(tc.scenario)}</div>`;
+  return `<div class="tc"><strong>${esc(tc.id)}</strong> ${esc(tc.title)}
+    <div class="muted">Covers: ${esc(tc.covers_criterion)}</div>${steps}
+    <div class="muted">Pass when: ${esc(tc.pass_condition)}</div></div>`;
+}
+
+function renderStory(s) {
+  const a = s.analysis; if (!a) return "";
+  const r = a.result;
+  const reviewed = a.status !== "pending";
+  const review = reviewed
+    ? `<div class="review">${a.status === "rejected" ? "Rejected" : `Approved as <span class="badge ${a.final_risk}">${a.final_risk}</span>`} by ${esc(a.reviewer)}</div>`
+    : `<div class="review"><strong>Review the AI suggestion</strong>
+        <div class="row" style="margin-top:8px">
+          <select id="dec-${a.id}">
+            <option value="approve">Approve as ${r.risk}</option>
+            <option value="override">Override risk</option>
+            <option value="reject">Reject drafts</option>
+          </select>
+          <select id="risk-${a.id}"><option>High</option><option>Medium</option><option>Low</option></select>
+          <input id="cmt-${a.id}" placeholder="Comment (needed for override/reject)" style="flex:1;min-width:180px">
+          <button onclick="review(${a.id})">Submit</button>
+        </div></div>`;
+  return `<div class="card story">
+    <div class="row"><span class="badge ${r.risk}">${r.risk}</span>
+      <span class="pill">${esc(r.test_approach)} testing</span>
+      ${r.part11_relevant ? '<span class="pill">Part 11 / Annex 11</span>' : ""}
+      <span class="muted">${esc(s.key)}${s.requirement_id ? " · " + esc(s.requirement_id) : ""} · model: ${esc(a.model)}</span></div>
+    <h3 style="margin-top:8px">${esc(s.title)}</h3>
+    <div class="muted">${esc(r.risk_rationale)}</div>
+    ${(r.open_questions || []).length ? `<div class="warn"><strong>Open questions:</strong> ${r.open_questions.map(esc).join(" · ")}</div>` : ""}
+    ${r.test_cases.map(renderTest).join("")}
+    ${review}
+  </div>`;
+}
+
+async function refresh() {
+  const [stories, audit] = await Promise.all([api("/api/stories"), api("/api/audit")]);
+  $("stories").innerHTML = stories.length ? stories.map(renderStory).join("")
+    : '<div class="card empty">No stories yet. Add one or load the sample.</div>';
+  $("audit").textContent = audit.map(e =>
+    `${e.at}  ${e.actor}  ${e.action}  #${e.story_id ?? "-"}  ${JSON.stringify(e.detail)}`).join("\n") || "(empty)";
+}
+
+async function review(id) {
+  try {
+    await api(`/api/analyses/${id}/review`, { method: "POST", body: JSON.stringify({
+      reviewer: $("actor").value || "anonymous",
+      decision: $(`dec-${id}`).value,
+      final_risk: $(`risk-${id}`).value,
+      comment: $(`cmt-${id}`).value,
+    })});
+    refresh();
+  } catch (e) { alert(e.message); }
+}
+
+$("storyForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = $("submitBtn"); btn.disabled = true; btn.textContent = "Analyzing…";
+  try {
+    await api("/api/stories", { method: "POST", body: JSON.stringify({
+      key: $("key").value, title: $("title").value, description: $("desc").value,
+      acceptance_criteria: $("ac").value.split("\n").map(s => s.trim()).filter(Boolean),
+      requirement_id: $("req").value || null, actor: $("actor").value || "anonymous",
+    })});
+    ev.target.reset(); $("actor").value = "zane";
+    refresh();
+  } catch (e) { alert(e.message); }
+  finally { btn.disabled = false; btn.textContent = "Analyze story"; }
+});
+
+$("sampleBtn").addEventListener("click", () => {
+  $("key").value = "LIMS-142"; $("req").value = "URS-017";
+  $("title").value = "Reviewer e-signature on batch test results";
+  $("desc").value = "As a QA reviewer, I want to electronically sign off batch test results so release decisions are traceable.";
+  $("ac").value = "Signing requires the reviewer to re-enter their password\nThe signature shows name, date/time and meaning (reviewed/approved)\nSigned results cannot be edited; changes create a new version\nEvery signature event is written to the audit trail";
+});
+
+api("/api/health").then(h => { $("mode").textContent = h.mock_ai ? "Mock AI (no API key)" : "Claude connected"; });
+refresh();
+</script>
+</body>
+</html>
