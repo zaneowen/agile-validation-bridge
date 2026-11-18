@@ -49,7 +49,7 @@ pytest -q
 
 ## Put it on the web
 
-The repo ships a `Dockerfile` (works on any container host) and a `render.yaml` for [Render](https://render.com).
+The hosted copy runs on [Vercel](https://vercel.com) with a [Neon](https://neon.com) Postgres database. When `DATABASE_URL` is set the app uses Postgres; without it, it uses a local SQLite file. Both block edits and deletes on the audit trail.
 
 **Before you deploy, set `AVB_USERS`.** Without it, anyone with the URL can use the app and spend your API credits. It takes comma-separated `user:password` pairs:
 
@@ -59,29 +59,30 @@ AVB_USERS=qa.lead:a-long-password,dev1:another-long-password
 
 When login is on, people sign in on a sign-in page (sessions last 12 hours), and the audit trail records the logged-in username, not the free-text name field. Scripts can send the same username and password as HTTP Basic auth. That gives you attributable records, which is closer to what Part 11 expects.
 
-### Render (simplest)
+### Vercel
 
-1. Push this repo to GitHub.
-2. In Render: **New → Blueprint**, then pick the repo. Render reads `render.yaml`.
-3. Enter `ANTHROPIC_API_KEY` and `AVB_USERS` when prompted.
-4. Open the `https://….onrender.com` URL and log in.
+Vercel finds the FastAPI app in `app/main.py` with no extra config.
 
-The blueprint uses the Starter plan because SQLite needs a persistent disk mounted at `/data`. For a free throwaway demo, change `plan: starter` to `plan: free` and delete the `disk:` block. Data is then wiped on every redeploy and restart.
+1. Import the GitHub repo in Vercel (or run `vercel link`).
+2. Add a Neon database: `vercel integration add neon` (the free plan is enough). This sets `DATABASE_URL`.
+3. Add `ANTHROPIC_API_KEY` and `AVB_USERS` under **Settings → Environment Variables**.
+4. Push to `main`. Pull requests get preview deployments.
 
-### Any other host (Fly.io, Railway, Azure, a VM)
+The tables are created on first start. To run the Postgres test locally, set `TEST_DATABASE_URL` to an **unpooled** connection string (`DATABASE_URL_UNPOOLED`); it works in a throwaway schema and drops it afterwards.
+
+### Any other host (Docker)
 
 ```bash
 docker build -t avb .
-docker run -p 8000:8000 -v avb-data:/data \
-  -e ANTHROPIC_API_KEY=sk-ant-... -e AVB_USERS=qa.lead:pw avb
+docker run -p 8000:8000 -v avb-data:/data -e ANTHROPIC_API_KEY=sk-ant-... -e AVB_USERS=qa.lead:pw avb
 ```
 
-Mount a volume at `/data` so the database survives restarts. The container listens on `$PORT` if the host sets it.
+Mount a volume at `/data` so the SQLite database survives restarts, or pass `DATABASE_URL` to use Postgres. The container listens on `$PORT` if the host sets it.
 
 ### Hosted-demo caveats
 
 - Use made-up stories only. Don't paste real company or patient data into a public demo.
-- SQLite with one server process is fine for a handful of users. Move to Postgres (on the roadmap) before a team uses it for real.
+- Shared passwords in `AVB_USERS` are fine for a demo. Use real accounts (SSO) before a team relies on it.
 - This is a proof of concept, not a validated system.
 
 ## API
@@ -102,9 +103,9 @@ Interactive docs: http://127.0.0.1:8000/docs
 ```
 app/
   main.py      FastAPI routes, review rules, RTM export
-  ai.py        Claude call (forced tool use = structured JSON) + offline mock
+  ai.py        Claude call (structured outputs = schema-checked JSON) + offline mock
   prompts.py   System prompt and output schema (public sources only)
-  db.py        SQLite schema, append-only audit log
+  db.py        Postgres (DATABASE_URL) or SQLite, append-only audit log
   auth.py      Optional login (AVB_USERS) for hosted copies
   static/      Single-page UI
 tests/         API tests (mock AI)
@@ -114,7 +115,8 @@ tests/         API tests (mock AI)
 
 - [ ] Jira Forge app: panel on each story calling this backend
 - [x] Basic login for hosted copies (`AVB_USERS`)
-- [ ] Postgres + real user accounts (SSO) in place of SQLite and shared passwords
+- [x] Postgres for the hosted copy (Vercel + Neon)
+- [ ] Real user accounts (SSO) in place of shared passwords
 - [ ] Re-run analysis when a story changes, with a diff in the audit trail
 - [ ] Test execution results (pass/fail + evidence upload) feeding the RTM
 - [ ] PDF validation summary report

@@ -6,3 +6,5 @@ venv/
 *.db
 .pytest_cache/
 .DS_Store
+.vercel
+.env*.local
