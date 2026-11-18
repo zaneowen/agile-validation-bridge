@@ -32,69 +32,70 @@ Rules:
 - Keep language plain and specific. No marketing words.
 """
 
-ANALYSIS_TOOL = {
-    "name": "record_story_analysis",
-    "description": "Record the GxP risk rating and draft test cases for one user story.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "risk": {"type": "string", "enum": ["High", "Medium", "Low"]},
-            "risk_rationale": {
-                "type": "string",
-                "description": "Two or three sentences explaining the rating.",
-            },
-            "part11_relevant": {
-                "type": "boolean",
-                "description": "True if the story touches electronic records or signatures.",
-            },
-            "test_approach": {"type": "string", "enum": ["scripted", "unscripted", "ad hoc"]},
-            "test_cases": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "e.g. TC-01"},
-                        "title": {"type": "string"},
-                        "covers_criterion": {
-                            "type": "string",
-                            "description": "The acceptance criterion this test covers.",
-                        },
-                        "steps": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "action": {"type": "string"},
-                                    "expected": {"type": "string"},
-                                },
-                                "required": ["action", "expected"],
-                            },
-                            "description": "Required for scripted tests; may be empty otherwise.",
-                        },
-                        "scenario": {
-                            "type": "string",
-                            "description": "For unscripted / ad hoc tests: what to try.",
-                        },
-                        "pass_condition": {"type": "string"},
+# JSON schema for the structured output (output_config.format). Every object sets
+# additionalProperties: false, which structured outputs require.
+ANALYSIS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "risk": {"type": "string", "enum": ["High", "Medium", "Low"]},
+        "risk_rationale": {
+            "type": "string",
+            "description": "Two or three sentences explaining the rating.",
+        },
+        "part11_relevant": {
+            "type": "boolean",
+            "description": "True if the story touches electronic records or signatures.",
+        },
+        "test_approach": {"type": "string", "enum": ["scripted", "unscripted", "ad hoc"]},
+        "test_cases": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string", "description": "e.g. TC-01"},
+                    "title": {"type": "string"},
+                    "covers_criterion": {
+                        "type": "string",
+                        "description": "The acceptance criterion this test covers.",
                     },
-                    "required": ["id", "title", "covers_criterion", "pass_condition"],
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "action": {"type": "string"},
+                                "expected": {"type": "string"},
+                            },
+                            "required": ["action", "expected"],
+                        },
+                        "description": "Required for scripted tests; may be empty otherwise.",
+                    },
+                    "scenario": {
+                        "type": "string",
+                        "description": "For unscripted / ad hoc tests: what to try.",
+                    },
+                    "pass_condition": {"type": "string"},
                 },
-            },
-            "open_questions": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Gaps in the story a reviewer should resolve.",
+                "required": ["id", "title", "covers_criterion", "pass_condition"],
             },
         },
-        "required": [
-            "risk",
-            "risk_rationale",
-            "part11_relevant",
-            "test_approach",
-            "test_cases",
-            "open_questions",
-        ],
+        "open_questions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Gaps in the story a reviewer should resolve.",
+        },
     },
+    "required": [
+        "risk",
+        "risk_rationale",
+        "part11_relevant",
+        "test_approach",
+        "test_cases",
+        "open_questions",
+    ],
 }
 
 
