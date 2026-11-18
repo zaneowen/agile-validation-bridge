@@ -88,10 +88,34 @@ def test_login_required_when_users_set(tmp_path, monkeypatch):
     monkeypatch.setenv("AVB_USERS", "qa.lead:pw1")
     c = TestClient(create_app(str(tmp_path / "auth.db")))
     assert c.get("/api/health").status_code == 200
-    assert c.get("/").status_code == 401
+    home = c.get("/", follow_redirects=False)
+    assert home.status_code == 303 and home.headers["location"] == "/login"
+    assert "www-authenticate" not in c.get("/api/stories").headers  # no browser popup
     assert c.get("/api/stories", auth=("qa.lead", "wrong")).status_code == 401
     s = c.post("/api/stories", json=STORY, auth=("qa.lead", "pw1")).json()
     c.post(f"/api/analyses/{s['analysis']['id']}/review", auth=("qa.lead", "pw1"),
            json={"reviewer": "someone-else", "decision": "approve"})
     actors = [e["actor"] for e in c.get("/api/audit", auth=("qa.lead", "pw1")).json()]
     assert actors[0] == "qa.lead" and actors[-1] == "qa.lead"
+
+
+def test_sign_in_page_sets_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVB_MOCK_AI", "1")
+    monkeypatch.setenv("AVB_USERS", "qa.lead:pw1")
+    c = TestClient(create_app(str(tmp_path / "login.db")))
+    assert "Sign in" in c.get("/login").text
+    bad = c.post("/login", data={"username": "qa.lead", "password": "nope"}, follow_redirects=False)
+    assert bad.headers["location"] == "/login?error=1" and "avb_session" not in c.cookies
+    ok = c.post("/login", data={"username": "qa.lead", "password": "pw1"}, follow_redirects=False)
+    assert ok.status_code == 303 and ok.headers["location"] == "/"
+    assert c.get("/").status_code == 200
+    assert c.get("/api/me").json() == {"user": "qa.lead"}
+    good = c.cookies["avb_session"]
+    c.cookies.clear()
+    c.cookies.set("avb_session", good[:-2] + ("00" if not good.endswith("00") else "11"))  # tampered
+    assert c.get("/api/me").status_code == 401
+    c.cookies.clear()
+    c.post("/login", data={"username": "qa.lead", "password": "pw1"})
+    assert c.get("/api/me").status_code == 200
+    c.get("/logout")
+    assert c.get("/api/me").status_code == 401
